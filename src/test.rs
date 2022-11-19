@@ -44,20 +44,20 @@ fn test_linked_list() {
 #[test]
 fn test_empty_heap() {
     let mut heap = Heap::<32>::new();
-    assert!(heap.alloc(Layout::from_size_align(1, 1).unwrap()).is_err());
+    assert!(heap.alloc(Layout::from_size_align(1, 1).unwrap()).is_none());
 }
 
 #[test]
 fn test_heap_add() {
     let mut heap = Heap::<32>::new();
-    assert!(heap.alloc(Layout::from_size_align(1, 1).unwrap()).is_err());
+    assert!(heap.alloc(Layout::from_size_align(1, 1).unwrap()).is_none());
 
     let space: [usize; 100] = [0; 100];
     unsafe {
         heap.add_to_heap(space.as_ptr() as usize, space.as_ptr().add(100) as usize);
     }
     let addr = heap.alloc(Layout::from_size_align(1, 1).unwrap());
-    assert!(addr.is_ok());
+    assert!(addr.is_some());
 }
 
 #[test]
@@ -70,8 +70,8 @@ fn test_heap_oom() {
 
     assert!(heap
         .alloc(Layout::from_size_align(100 * size_of::<usize>(), 1).unwrap())
-        .is_err());
-    assert!(heap.alloc(Layout::from_size_align(1, 1).unwrap()).is_ok());
+        .is_none());
+    assert!(heap.alloc(Layout::from_size_align(1, 1).unwrap()).is_some());
 }
 
 #[test]
@@ -89,7 +89,7 @@ fn test_heap_oom_rescue() {
 #[test]
 fn test_heap_alloc_and_free() {
     let mut heap = Heap::<32>::new();
-    assert!(heap.alloc(Layout::from_size_align(1, 1).unwrap()).is_err());
+    assert!(heap.alloc(Layout::from_size_align(1, 1).unwrap()).is_none());
 
     let space: [usize; 100] = [0; 100];
     unsafe {

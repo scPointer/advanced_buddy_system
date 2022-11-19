@@ -100,25 +100,23 @@ impl<const ORDER: usize> Heap<ORDER> {
     }
 
     /// Alloc a range of memory from the heap satifying `layout` requirements
-    pub fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, ()> {
-        let size = max(
-            layout.size().next_power_of_two(),
-            max(layout.align(), size_of::<usize>()),
-        );
-        let class = size.trailing_zeros() as usize;
+    pub fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>> {
+        // align 问题:
+        // 原来的实现中，分配出去的块的 align 至少是 layout.size()，所以不需要考虑 unaligned 问题
+        // 现在的实现中，这一点仍然保持
+        let real_size = layout.size().max(layout.align()).max(size_of::<usize>());
+        let block_size = real_size.max(layout.size().next_power_of_two());
+        let class = block_size.trailing_zeros() as usize;
         for i in class..self.free_list.len() {
             // Find the first non-empty size class
             if !self.free_list[i].is_empty() {
                 // Split buffers
                 for j in (class + 1..i + 1).rev() {
-                    if let Some(block) = self.free_list[j].pop() {
-                        unsafe {
-                            self.free_list[j - 1]
-                                .push((block as usize + (1 << (j - 1))) as *mut usize);
-                            self.free_list[j - 1].push(block);
-                        }
-                    } else {
-                        return Err(());
+                    let block = self.free_list[j].pop()?;
+                    unsafe {
+                        self.free_list[j - 1]
+                            .push((block as usize + (1 << (j - 1))) as *mut usize);
+                        self.free_list[j - 1].push(block);
                     }
                 }
 
@@ -127,17 +125,13 @@ impl<const ORDER: usize> Heap<ORDER> {
                         .pop()
                         .expect("current block should have free space now")
                         as *mut u8,
-                );
-                if let Some(result) = result {
-                    self.user += layout.size();
-                    self.allocated += size;
-                    return Ok(result);
-                } else {
-                    return Err(());
-                }
+                )?;
+                self.user += layout.size();
+                self.allocated += real_size;
+                return Some(result);
             }
         }
-        Err(())
+        None
     }
 
     /// Dealloc a range of memory from the heap
@@ -258,7 +252,6 @@ unsafe impl<const ORDER: usize> GlobalAlloc for LockedHeap<ORDER> {
         self.0
             .lock()
             .alloc(layout)
-            .ok()
             .map_or(0 as *mut u8, |allocation| allocation.as_ptr())
     }
 
@@ -319,12 +312,11 @@ unsafe impl<const ORDER: usize> GlobalAlloc for LockedHeapWithRescue<ORDER> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let mut inner = self.inner.lock();
         match inner.alloc(layout) {
-            Ok(allocation) => allocation.as_ptr(),
-            Err(_) => {
+            Some(allocation) => allocation.as_ptr(),
+            None => {
                 (self.rescue)(&mut inner, &layout);
                 inner
                     .alloc(layout)
-                    .ok()
                     .map_or(0 as *mut u8, |allocation| allocation.as_ptr())
             }
         }
