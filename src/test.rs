@@ -5,6 +5,7 @@ use crate::LockedHeapWithRescue;
 use core::alloc::GlobalAlloc;
 use core::alloc::Layout;
 use core::mem::size_of;
+use std::ptr::NonNull;
 
 #[test]
 fn test_linked_list() {
@@ -144,4 +145,42 @@ fn test_frame_allocator_alloc_and_free_complex() {
     let addr1 = frame.alloc(1).unwrap();
     let addr2 = frame.alloc(1).unwrap();
     assert_ne!(addr1, addr2);
+}
+
+struct AllocVec(pub Vec<(NonNull<u8>, Layout)>);
+impl AllocVec {
+    fn new() -> Self {
+        Self(Vec::new())
+    }
+    fn alloc(&mut self, heap: &mut Heap<32>, size: usize) {
+        let layout = Layout::from_size_align(size * size_of::<usize>(), 8).unwrap();
+        self.0.push((heap.alloc(layout).unwrap(), layout));
+    }
+    fn dealloc_all(&mut self, heap: &mut Heap<32>) {
+        for (ptr, layout) in self.0.drain(..) {
+            heap.dealloc(ptr, layout);
+        }
+    }
+    fn dealloc_one(&mut self, heap: &mut Heap<32>, pos: usize) {
+        let (ptr, layout) = self.0.remove(pos);
+        heap.dealloc(ptr, layout);
+    }
+}
+#[test]
+fn advanced_buddy_system_test() {
+    use std::vec::Vec;
+    const FIRST: usize = 10000;
+    let mut heap = Heap::<32>::new();
+    let space: [usize; FIRST] = [0; FIRST];
+    unsafe {
+        heap.add_to_heap(space.as_ptr() as usize, space.as_ptr().add(FIRST) as usize);
+    }
+
+    let mut vec: AllocVec = AllocVec::new();
+    vec.alloc(&mut heap, 55);
+    for _ in 0..10 {
+        vec.alloc(&mut heap, 1);
+    }
+    vec.dealloc_all(&mut heap);
+    //assert!(heap.alloc(Layout::from_size_align(1, 1).unwrap()).is_some());
 }

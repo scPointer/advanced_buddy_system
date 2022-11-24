@@ -1,5 +1,5 @@
 #![cfg_attr(feature = "const_fn", feature(const_mut_refs, const_fn_fn_ptr_basics))]
-#![no_std]
+//#![no_std]
 
 #[cfg(test)]
 #[macro_use]
@@ -17,6 +17,7 @@ use core::mem::size_of;
 #[cfg(feature = "use_spin")]
 use core::ops::Deref;
 use core::ptr::NonNull;
+use rand_chacha::rand_core::block;
 #[cfg(feature = "use_spin")]
 use spin::Mutex;
 
@@ -86,7 +87,12 @@ impl<const ORDER: usize> Heap<ORDER> {
             let lowbit = current_start & (!current_start + 1);
             let size = min(lowbit, prev_power_of_two(end - current_start));
             total += size;
-
+            println!(
+                "Init ({}){}, at {:x}",
+                size.trailing_zeros(),
+                size,
+                current_start
+            );
             self.free_list[size.trailing_zeros() as usize].push(current_start as *mut usize);
             current_start += size;
         }
@@ -106,6 +112,7 @@ impl<const ORDER: usize> Heap<ORDER> {
         // 现在的实现中，这一点仍然保持
         let real_size = layout.size().max(layout.align()).max(size_of::<usize>());
         let block_size = real_size.max(layout.size().next_power_of_two());
+        println!("Req {} / {}", real_size, block_size);
         let class = block_size.trailing_zeros() as usize;
         for i in class..self.free_list.len() {
             // Find the first non-empty size class
@@ -113,19 +120,36 @@ impl<const ORDER: usize> Heap<ORDER> {
                 // Split buffers
                 for j in (class + 1..i + 1).rev() {
                     let block = self.free_list[j].pop()?;
+                    println!("Sep ({}){}", j, 1 << j);
                     unsafe {
-                        self.free_list[j - 1]
-                            .push((block as usize + (1 << (j - 1))) as *mut usize);
+                        self.free_list[j - 1].push((block as usize + (1 << (j - 1))) as *mut usize);
                         self.free_list[j - 1].push(block);
                     }
                 }
-
                 let result = NonNull::new(
                     self.free_list[class]
                         .pop()
                         .expect("current block should have free space now")
                         as *mut u8,
                 )?;
+                println!(
+                    "Alc ({}){}, at {:x}",
+                    class,
+                    1 << class,
+                    result.as_ptr() as usize
+                );
+                // 需要还回去的内存区间是 [left_start, block_end)
+                let block_end = result.as_ptr() as usize + block_size;
+                let mut left_start = result.as_ptr() as usize + real_size;
+                while left_start < block_end {
+                    let lowbit = left_start & (!left_start + 1);
+                    let class = lowbit.trailing_zeros() as usize;
+                    println!("Ret ({}){}, at {:x}", class, lowbit, left_start);
+                    unsafe {
+                        self.free_list[class].push(left_start as *mut usize);
+                    }
+                    left_start += lowbit;
+                }
                 self.user += layout.size();
                 self.allocated += real_size;
                 return Some(result);
@@ -134,46 +158,62 @@ impl<const ORDER: usize> Heap<ORDER> {
         None
     }
 
-    /// Dealloc a range of memory from the heap
-    pub fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
-        let size = max(
-            layout.size().next_power_of_two(),
-            max(layout.align(), size_of::<usize>()),
-        );
-        let class = size.trailing_zeros() as usize;
-
-        unsafe {
-            // Put back into free list
-            self.free_list[class].push(ptr.as_ptr() as *mut usize);
-
-            // Merge free buddy lists
-            let mut current_ptr = ptr.as_ptr() as usize;
-            let mut current_class = class;
-            while current_class < self.free_list.len() {
-                let buddy = current_ptr ^ (1 << current_class);
-                let mut flag = false;
-                for block in self.free_list[current_class].iter_mut() {
-                    if block.value() as usize == buddy {
-                        block.pop();
-                        flag = true;
-                        break;
-                    }
-                }
-
-                // Free buddy found
-                if flag {
-                    self.free_list[current_class].pop();
-                    current_ptr = min(current_ptr, buddy);
-                    current_class += 1;
-                    self.free_list[current_class].push(current_ptr as *mut usize);
-                } else {
+    unsafe fn push_and_try_merge(&mut self, addr: usize, class: usize) {
+        // Put back into free list
+        self.free_list[class].push(addr as *mut usize);
+        // Merge free buddy lists
+        let mut current_ptr = addr;
+        let mut current_class = class;
+        while current_class < self.free_list.len() {
+            let buddy = current_ptr ^ (1 << current_class);
+            let mut flag = false;
+            for block in self.free_list[current_class].iter_mut() {
+                if block.value() as usize == buddy {
+                    block.pop();
+                    flag = true;
                     break;
                 }
             }
+
+            // Free buddy found
+            if flag {
+                self.free_list[current_class].pop();
+                current_ptr = min(current_ptr, buddy);
+                current_class += 1;
+                println!("MergeTo ({}){}, at {:x}", current_class, 1 << current_class, current_ptr);
+                self.free_list[current_class].push(current_ptr as *mut usize);
+            } else {
+                break;
+            }
+        }
+    }
+    /// Dealloc a range of memory from the heap
+    pub fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
+        let real_size = layout.size().max(layout.align()).max(size_of::<usize>());
+        let block_size = real_size.max(layout.size().next_power_of_two());
+        println!("DealcReq {} / {}, at {:x}", real_size, block_size, ptr.as_ptr() as usize);
+        // 如果区间没有被拆分，则只 dealloc 一次
+        if real_size == block_size {
+            unsafe {
+                self.push_and_try_merge(ptr.as_ptr() as usize, block_size.trailing_zeros() as usize);
+            }
+            return;
+        }
+        // 需要拆分的内存区间是 [left_start, real_end)
+        let mut real_end = ptr.as_ptr() as usize + real_size;
+        let left_start = ptr.as_ptr() as usize;
+        while left_start < real_end {
+            let lowbit = real_end & (!real_end + 1);
+            let class = lowbit.trailing_zeros() as usize;
+            println!("Dealc ({}){}, at {:x}", class, lowbit, real_end - lowbit);
+            unsafe {
+                self.push_and_try_merge(real_end - lowbit, class);
+            }
+            real_end -= lowbit;
         }
 
         self.user -= layout.size();
-        self.allocated -= size;
+        self.allocated -= real_size;
     }
 
     /// Return the number of bytes that user requests
